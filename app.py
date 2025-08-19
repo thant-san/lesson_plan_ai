@@ -516,6 +516,17 @@ if uploaded_file is not None:
             recipient_emails_raw = st.sidebar.text_area("Student emails (comma-separated)", key="recipient_emails") if enable_delivery else ""
             email_subject = st.sidebar.text_input("Email subject", value="Your Quiz", key="email_subject") if enable_delivery else ""
             email_message = st.sidebar.text_area("Email message", value="Please complete the quiz at the link below:", key="email_message") if enable_delivery else ""
+            pending_exists = bool(st.session_state.get("pending_quiz_text"))
+            if enable_delivery:
+                st.sidebar.info("After the agent generates a quiz, review it and click Confirm & Send.")
+                col_a, col_b = st.sidebar.columns(2)
+                with col_a:
+                    confirm_click = st.button("Confirm & Send Quiz", key="btn_confirm_send", disabled=not pending_exists)
+                with col_b:
+                    if st.button("Clear Pending", key="btn_clear_pending", disabled=not pending_exists):
+                        st.session_state.pop("pending_quiz_text", None)
+                        st.session_state.pop("pending_form_link", None)
+                        st.experimental_rerun()
             if st.sidebar.button("Reset Chat", key="btn_reset_chat"):
                 st.session_state.pop("agent_messages", None)
 
@@ -561,10 +572,16 @@ if uploaded_file is not None:
                 with st.chat_message("assistant"):
                     st.markdown(assistant_reply)
 
-                # Optional delivery path: convert assessment and send Google Form link
+                # Prepare for optional delivery, but require explicit confirmation
                 if enable_delivery and any(k in user_prompt.lower() for k in ["quiz", "assessment", "mcq", "short", "project"]):
-                    with st.spinner("Preparing Google Form and sending emails..."):
-                        schema = convert_assessment_text_to_schema(assistant_reply)
+                    st.session_state["pending_quiz_text"] = assistant_reply
+                    st.info("Quiz prepared. Review it above. Use the sidebar to Confirm & Send.")
+
+            # Handle confirmed sending in a separate step
+            if enable_delivery and st.session_state.get("pending_quiz_text") and 'confirm_click' in locals() and confirm_click:
+                with st.spinner("Creating Google Form and sending emails..."):
+                    try:
+                        schema = convert_assessment_text_to_schema(st.session_state["pending_quiz_text"])
                         if not schema:
                             st.error("Could not convert the generated content into a quiz schema.")
                         else:
@@ -576,20 +593,22 @@ if uploaded_file is not None:
                                 if not forms_service or not gmail_service:
                                     st.error("Google services failed to initialize.")
                                 else:
-                                    try:
-                                        form_id, form_link = create_google_form_from_schema(forms_service, schema)
-                                        st.success(f"Form created: {form_link}")
-                                        recipients = [e.strip() for e in (recipient_emails_raw or "").split(',') if e.strip()]
-                                        if recipients:
-                                            send_email_with_link(
-                                                gmail_service,
-                                                recipients=recipients,
-                                                subject=email_subject or "Your Quiz",
-                                                body_text=f"{email_message or 'Please complete the quiz at the link below:'}\n\n{form_link}",
-                                            )
-                                            st.success(f"Email sent to: {', '.join(recipients)}")
-                                    except Exception as e:
-                                        st.error(f"Failed to create form or send emails: {e}")
+                                    form_id, form_link = create_google_form_from_schema(forms_service, schema)
+                                    st.session_state["pending_form_link"] = form_link
+                                    st.success(f"Form created: {form_link}")
+                                    recipients = [e.strip() for e in (recipient_emails_raw or "").split(',') if e.strip()]
+                                    if recipients:
+                                        send_email_with_link(
+                                            gmail_service,
+                                            recipients=recipients,
+                                            subject=email_subject or "Your Quiz",
+                                            body_text=f"{email_message or 'Please complete the quiz at the link below:'}\n\n{form_link}",
+                                        )
+                                        st.success(f"Email sent to: {', '.join(recipients)}")
+                                    # Clear pending after sending
+                                    st.session_state.pop("pending_quiz_text", None)
+                    except Exception as e:
+                        st.error(f"Failed to create form or send emails: {e}")
 
 st.markdown("---")
 st.caption("Upload a PDF, then use the sidebar to generate a lesson plan or assessments.")
