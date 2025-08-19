@@ -7,7 +7,7 @@ import io
 # --- 1. Load OpenAI API Key from Streamlit Secrets ---
 # Make sure you have a .streamlit/secrets.toml file with OPENAI_API_KEY="your_api_key_here"
 try:
-    client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
+    client = OpenAI(base_url="https://api.aimlapi.com/v1",api_key=st.secrets["OPENAI_API_KEY"])
 except KeyError:
     st.error("OpenAI API key not found. Please set it in .streamlit/secrets.toml")
     st.stop()
