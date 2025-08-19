@@ -81,7 +81,7 @@ Requirements:
 
     try:
         response = client.chat.completions.create(
-            model="gpt-3.5-turbo",
+            model="openai/gpt-5-chat-latest",
             messages=[
                 {"role": "system", "content": "You are a senior instructional designer and master teacher."},
                 {"role": "user", "content": prompt}
