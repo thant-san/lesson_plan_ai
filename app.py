@@ -3,14 +3,37 @@ import openai
 from openai import OpenAI
 import PyPDF2
 import io
+import os
 
-# --- 1. Load OpenAI API Key from Streamlit Secrets ---
-# Make sure you have a .streamlit/secrets.toml file with OPENAI_API_KEY="your_api_key_here"
+# --- 1. Load OpenAI API configuration ---
+# Prefer Streamlit secrets, fallback to environment variables
+api_key = None
+base_url = None
+model_name = None
+
 try:
-    client = OpenAI(base_url="https://api.aimlapi.com/v1",api_key=st.secrets["OPENAI_API_KEY"])
-except KeyError:
-    st.error("OpenAI API key not found. Please set it in .streamlit/secrets.toml")
+    api_key = st.secrets.get("OPENAI_API_KEY")
+    base_url = st.secrets.get("OPENAI_BASE_URL")
+    model_name = st.secrets.get("OPENAI_MODEL")
+except Exception:
+    pass
+
+if not api_key:
+    api_key = os.getenv("OPENAI_API_KEY")
+if not base_url:
+    base_url = os.getenv("OPENAI_BASE_URL")
+if not model_name:
+    model_name = os.getenv("OPENAI_MODEL")
+
+if not api_key:
+    st.error("OpenAI API key not found. Set OPENAI_API_KEY in .streamlit/secrets.toml or as an environment variable.")
     st.stop()
+
+# Default model depending on provider
+if not model_name:
+    model_name = "openai/gpt-5-chat-latest" if base_url else "gpt-3.5-turbo"
+
+client = OpenAI(api_key=api_key, base_url=base_url) if base_url else OpenAI(api_key=api_key)
 
 # --- 2. Function to Extract Text from PDF ---
 def extract_text_from_pdf(uploaded_file):
@@ -47,7 +70,7 @@ def extract_text_from_pdf(uploaded_file):
     return None
 
 # --- 3. Function to Generate Lesson Plan ---
-def generate_lesson_plan(text_content, study_duration_weeks, num_students):
+def generate_lesson_plan(text_content, study_duration_weeks, num_students, sections_per_week):
     """
     Uses an LLM to generate a structured lesson plan based on extracted PDF content,
     total study duration (in weeks), and the number of students.
@@ -62,6 +85,7 @@ You are an expert pedagogy designer. Create a practical, well-structured lesson 
 Constraints and context:
 - Total duration: {study_duration_weeks} week(s)
 - Class size: {num_students} students
+- Sections per week: {sections_per_week}
 - Source content (use to derive objectives, topics, examples, and assessments):
 ---
 {text_content[:6000]}
@@ -70,7 +94,7 @@ Constraints and context:
 Requirements:
 1) Provide an overview with goals and success criteria tailored to the class size.
 2) Break down the plan by week with clear learning objectives, key topics, and vocabulary.
-3) For each week include:
+3) For each week, divide into exactly {sections_per_week} section(s). For each section include:
    - Activities (at least one teacher-led, one student-centered, one collaborative activity)
    - Materials/resources
    - Differentiation for mixed abilities and larger group management if applicable
@@ -81,7 +105,7 @@ Requirements:
 
     try:
         response = client.chat.completions.create(
-            model="openai/gpt-5-chat-latest",
+            model=model_name,
             messages=[
                 {"role": "system", "content": "You are a senior instructional designer and master teacher."},
                 {"role": "user", "content": prompt}
@@ -128,7 +152,7 @@ if uploaded_file is not None:
         )
 
         st.markdown("### Inputs")
-        col1, col2 = st.columns(2)
+        col1, col2, col3 = st.columns(3)
         with col1:
             study_duration_weeks = st.number_input(
                 "Duration of study (weeks)",
@@ -147,10 +171,19 @@ if uploaded_file is not None:
                 step=1,
                 key="num_students",
             )
+        with col3:
+            sections_per_week = st.number_input(
+                "Sections per week",
+                min_value=1,
+                max_value=14,
+                value=2,
+                step=1,
+                key="sections_per_week",
+            )
 
         if st.button("Generate Lesson Plan", use_container_width=True, key="generate_plan_button"):
             with st.spinner("Generating lesson plan with AI..."):
-                plan = generate_lesson_plan(pdf_text, study_duration_weeks, num_students)
+                plan = generate_lesson_plan(pdf_text, study_duration_weeks, num_students, sections_per_week)
             lesson_plan_placeholder.subheader("Lesson Plan")
             lesson_plan_placeholder.markdown(plan)
     else:
