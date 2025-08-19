@@ -1,159 +1,111 @@
 import streamlit as st
 import openai
 import PyPDF2
-import io # To handle file-like objects for PDF reading
+import io
 
-# Set your API key from Streamlit secrets
+# --- 1. Load OpenAI API Key from Streamlit Secrets ---
 # Make sure you have a .streamlit/secrets.toml file with OPENAI_API_KEY="your_api_key_here"
-openai.api_key = st.secrets["OPENAI_API_KEY"]
+try:
+    openai.api_key = st.secrets["OPENAI_API_KEY"]
+except KeyError:
+    st.error("OpenAI API key not found. Please set it in .streamlit/secrets.toml")
+    st.stop() # Stop the app if API key is not found
 
+# --- 2. Function to Extract Text from PDF ---
 def extract_text_from_pdf(uploaded_file):
     """
     Extracts text content from an uploaded PDF file.
+    Returns the extracted text as a string, or None if an error occurs.
     """
     if uploaded_file is not None:
         try:
-            # Create a PdfReader object
+            # PyPDF2 expects a file-like object, io.BytesIO makes the uploaded file readable like one
             pdf_reader = PyPDF2.PdfReader(io.BytesIO(uploaded_file.read()))
             text = ""
+            # Iterate through each page and extract text
             for page in pdf_reader.pages:
-                text += page.extract_text() or "" # Handle potential None if page has no extractable text
+                page_text = page.extract_text()
+                if page_text: # Ensure text is not None
+                    text += page_text
             return text
+        except PyPDF2.utils.PdfReadError:
+            st.error("Invalid PDF file. Please upload a valid, unencrypted PDF.")
+            return None
         except Exception as e:
-            st.error(f"Error reading PDF: {e}. Please ensure it's a valid PDF and not password-protected.")
+            st.error(f"An error occurred while reading the PDF: {e}")
             return None
     return None
 
-def generate_lesson_plan(topic, grade, duration, num_students, chapters_info, pdf_content=None):
+# --- 3. Function to Get LLM Summary ---
+def get_llm_summary(text_content):
     """
-    Generates a structured lesson plan using a large language model,
-    incorporating PDF content, number of students, and chapter details.
+    Sends the extracted text content to OpenAI's GPT-3.5-turbo for a summary.
     """
-    prompt = f"""
-    You are an AI assistant specialized in creating detailed, engaging, and structured lesson plans.
+    if not text_content:
+        return "No text provided for summarization."
 
-    **Objective:** Create a comprehensive lesson plan for a {grade} grade class.
-
-    **Core Information:**
-    - **Topic:** "{topic}"
-    - **Duration:** Approximately {duration} minutes
-    - **Number of Students:** {num_students} students
-
-    **Structure and Content Requirements:**
-
-    The lesson plan MUST be structured using the following headings and sub-sections, adapted to the provided information:
-
-    ## 1. Introduction & Hook (approx. 5-10 minutes)
-    - A brief, engaging activity or question to grab students' attention, considering {num_students} students.
-
-    ## 2. Main Lesson Content (structured by chapters)
-    - Break down the main content into sections based on the following chapter information:
-    """
+    prompt = f"""Summarize the following text briefly and concisely.
     
-    if chapters_info:
-        for i, chapter in enumerate(chapters_info.splitlines()):
-            if chapter.strip(): # Add only non-empty lines as chapters
-                prompt += f"- **Chapter {i+1}: {chapter.strip()}**\n"
-                prompt += "  - Detailed explanation of key concepts for this chapter.\n"
-                prompt += "  - Relevant examples and demonstrations for this chapter.\n"
-                prompt += "  - An interactive activity or group work suggestion for this chapter, suitable for the class size.\n"
-    else:
-        prompt += "- **Main Concepts:** Detailed explanation of key concepts, examples, and an interactive activity or group work.\n"
-    
-    prompt += """
-    ## 3. Wrap-Up & Assessment
-    - A summary of the main points covered.
-    - A quick assessment (e.g., a short quiz, an exit ticket, or a discussion prompt) to check understanding.
-    - Suggested homework or follow-up activity.
-
-    """
-    
-    if pdf_content:
-        prompt += f"""
-    **Reference Material (from uploaded PDF):**
-    Please draw information and specific details primarily from the following text to inform the lesson plan content:
+    Text:
     ---
-    {pdf_content[:2500]} # Limiting PDF content to fit within typical LLM context window
+    {text_content[:3000]} # Limit text length to fit within typical LLM context window for a quick test
     ---
-    If the PDF content is very long, focus on the most relevant information for the topic and chapters provided.
     """
-    else:
-        prompt += """
-    **Note:** No PDF content was provided, so generate the lesson plan based on general knowledge of the topic.
-    """
-
+    
     try:
         response = openai.ChatCompletion.create(
-            model="gpt-3.5-turbo", # You can use "gpt-4" or other models for better quality
+            model="gpt-3.5-turbo", # A good general-purpose model for summarization
             messages=[
-                {"role": "system", "content": "You are a helpful AI assistant specialized in creating structured lesson plans for educators."},
+                {"role": "system", "content": "You are a helpful assistant that summarizes text."},
                 {"role": "user", "content": prompt}
             ],
-            max_tokens=2000, # Increased max_tokens to allow for longer lesson plans
-            temperature=0.7 # Controls creativity vs. predictability
+            max_tokens=200, # Keep the summary short for this test
+            temperature=0.3 # Lower temperature for more factual and less creative summary
         )
         return response['choices'][0]['message']['content']
+    except openai.error.OpenAIError as e:
+        st.error(f"OpenAI API Error: {e}. Check your API key and network connection.")
+        return "Failed to get summary due to an API error."
     except Exception as e:
-        st.error(f"An error occurred while generating the lesson plan: {e}. Please try again.")
-        st.info("Tip: If the error persists, the PDF might be too large or the prompt too complex for the current AI model. Try a shorter PDF or a simpler prompt.")
-        return None
-
-# --- Streamlit App Interface ---
-
-st.set_page_config(page_title="💡 AI-Powered Lesson Plan Generator", layout="centered")
-
-st.title("💡 AI-Powered Lesson Plan Generator")
-st.markdown("Effortlessly create structured lesson plans by providing a topic, grade, duration, student count, and even source material from a PDF or specific chapter details.")
-
-st.sidebar.header("Settings")
-with st.sidebar:
-    st.markdown("---")
-    st.subheader("API Key")
-    st.info("API key loaded from `.streamlit/secrets.toml`")
-    st.markdown("---")
+        st.error(f"An unexpected error occurred with the LLM call: {e}")
+        return "Failed to get summary due to an unexpected error."
 
 
-st.header("Lesson Details Input")
+# --- 4. Streamlit User Interface ---
+st.set_page_config(page_title="PDF Reader & LLM Summarizer", layout="centered")
 
-uploaded_file = st.file_uploader("Upload a PDF with Lesson Content (Optional)", type=["pdf"], key="pdf_uploader")
-topic = st.text_input("📚 Topic:", placeholder="e.g., Photosynthesis, The American Revolution", key="topic_input")
-grade = st.selectbox("🎓 Grade Level:", ["Kindergarten", "1st Grade", "2nd Grade", "3rd Grade", "4th Grade", 
-                                        "5th Grade", "6th Grade", "7th Grade", "8th Grade", "9th Grade", 
-                                        "10th Grade", "11th Grade", "12th Grade", "College Level"], key="grade_select")
-duration = st.slider("⏰ Lesson Duration (in minutes):", min_value=15, max_value=120, step=5, value=45, key="duration_slider")
-num_students = st.number_input("🧑‍🎓 Number of Students:", min_value=1, value=25, step=1, key="num_students_input")
-chapters_info = st.text_area("✍️ Chapter/Section Details (Optional - one per line):", 
-                             placeholder="e.g.,\nIntroduction to Cells\nCell Organelles\nCell Division", 
-                             height=150, key="chapters_input")
+st.title("📄 PDF Reader & AI Summarizer")
+st.markdown("Upload a PDF to extract its text and get a quick summary from an AI.")
 
+# File uploader widget
+uploaded_file = st.file_uploader("Upload a PDF file", type=["pdf"], key="pdf_uploader")
 
-st.markdown("---")
-# Button to generate the lesson plan
-if st.button("✨ Generate Lesson Plan", use_container_width=True, key="generate_button"):
-    if not topic:
-        st.error("❗ Please enter a **Topic** to generate a lesson plan.")
-    else:
-        pdf_text = None
-        if uploaded_file:
-            with st.spinner("Extracting text from PDF..."):
-                pdf_text = extract_text_from_pdf(uploaded_file)
-            if not pdf_text:
-                st.warning("Could not extract text from the PDF. Generating lesson plan based on other inputs only.")
-        
-        if pdf_text and len(pdf_text) > 5000: # Simple check for very long PDFs
-            st.warning("The extracted text from the PDF is very long. The AI will only use the beginning part to fit its context window.")
-            # Truncate text for LLM to avoid context window issues
-            pdf_text = pdf_text[:5000] # Adjust this limit based on your LLM's context window
+# Placeholder for extracted text and summary
+extracted_text_placeholder = st.empty()
+llm_summary_placeholder = st.empty()
 
-        with st.spinner("Crafting your personalized lesson plan..."):
-            lesson_plan_content = generate_lesson_plan(topic, grade, duration, num_students, chapters_info, pdf_text)
+if uploaded_file is not None:
+    st.info("PDF uploaded successfully! Processing...")
+
+    # Extract text when file is uploaded
+    with st.spinner("Extracting text from PDF..."):
+        pdf_text = extract_text_from_pdf(uploaded_file)
+    
+    if pdf_text:
+        extracted_text_placeholder.subheader("Extracted Text Preview:")
+        # Display a truncated version of the extracted text for preview
+        extracted_text_placeholder.text_area("Full Text (truncated for preview):", pdf_text[:1000] + "..." if len(pdf_text) > 1000 else pdf_text, height=300, disabled=True)
+
+        # Button to trigger LLM summarization
+        if st.button("Summarize Text with AI", use_container_width=True, key="summarize_button"):
+            with st.spinner("Asking AI to summarize..."):
+                summary = get_llm_summary(pdf_text)
             
-            if lesson_plan_content:
-                st.markdown("---")
-                st.subheader("Your Generated Lesson Plan")
-                st.markdown(lesson_plan_content) # Render the markdown output from the LLM
-            else:
-                st.error("Failed to generate a lesson plan. Please check your inputs and try again.")
+            llm_summary_placeholder.subheader("AI Summary:")
+            llm_summary_placeholder.write(summary)
+    else:
+        st.error("Failed to extract text from the PDF. Please try a different file.")
 
 st.markdown("---")
-st.caption("Powered by AI 🚀 | Ensure your API key is correctly set in `.streamlit/secrets.toml`")
+st.caption("This is a step-by-step test for PDF reading and basic LLM integration.")
+
