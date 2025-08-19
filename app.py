@@ -517,6 +517,7 @@ if uploaded_file is not None:
             email_subject = st.sidebar.text_input("Email subject", value="Your Quiz", key="email_subject") if enable_delivery else ""
             email_message = st.sidebar.text_area("Email message", value="Please complete the quiz at the link below:", key="email_message") if enable_delivery else ""
             pending_exists = bool(st.session_state.get("pending_quiz_text"))
+            last_reply_exists = bool(st.session_state.get("last_assistant_reply"))
             if enable_delivery:
                 st.sidebar.info("After the agent generates a quiz, review it and click Confirm & Send.")
                 col_a, col_b = st.sidebar.columns(2)
@@ -527,6 +528,21 @@ if uploaded_file is not None:
                         st.session_state.pop("pending_quiz_text", None)
                         st.session_state.pop("pending_form_link", None)
                         st.experimental_rerun()
+                # Allow marking the last assistant response as the pending quiz
+                st.sidebar.button(
+                    "Use last assistant response as quiz",
+                    key="btn_use_last_as_quiz",
+                    disabled=not last_reply_exists,
+                    on_click=lambda: st.session_state.update({"pending_quiz_text": st.session_state.get("last_assistant_reply", "")}),
+                )
+                # Show a short preview of what will be sent
+                if pending_exists:
+                    st.sidebar.text_area(
+                        "Pending quiz preview",
+                        value=(st.session_state.get("pending_quiz_text") or "")[:800] + ("..." if len(st.session_state.get("pending_quiz_text") or "") > 800 else ""),
+                        height=150,
+                        disabled=True,
+                    )
             if st.sidebar.button("Reset Chat", key="btn_reset_chat"):
                 st.session_state.pop("agent_messages", None)
 
@@ -569,6 +585,7 @@ if uploaded_file is not None:
                         assistant_reply = f"Sorry, I encountered an error: {e}"
 
                 st.session_state.agent_messages.append({"role": "assistant", "content": assistant_reply})
+                st.session_state["last_assistant_reply"] = assistant_reply
                 with st.chat_message("assistant"):
                     st.markdown(assistant_reply)
 
@@ -578,10 +595,15 @@ if uploaded_file is not None:
                     st.info("Quiz prepared. Review it above. Use the sidebar to Confirm & Send.")
 
             # Handle confirmed sending in a separate step
-            if enable_delivery and st.session_state.get("pending_quiz_text") and 'confirm_click' in locals() and confirm_click:
+            if enable_delivery and 'confirm_click' in locals() and confirm_click:
                 with st.spinner("Creating Google Form and sending emails..."):
                     try:
-                        schema = convert_assessment_text_to_schema(st.session_state["pending_quiz_text"])
+                        # Use pending quiz if available, otherwise fallback to last assistant reply
+                        quiz_source_text = st.session_state.get("pending_quiz_text") or st.session_state.get("last_assistant_reply")
+                        if not quiz_source_text:
+                            st.error("No quiz content available to send. Generate or mark content as quiz first.")
+                            raise RuntimeError("No quiz content to send")
+                        schema = convert_assessment_text_to_schema(quiz_source_text)
                         if not schema:
                             st.error("Could not convert the generated content into a quiz schema.")
                         else:
