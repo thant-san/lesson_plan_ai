@@ -4,6 +4,7 @@ from openai import OpenAI
 import PyPDF2
 import io
 import os
+import json
 
 # --- 1. Load OpenAI API configuration ---
 # Prefer Streamlit secrets, fallback to environment variables
@@ -183,6 +184,216 @@ Source content:
         st.error(f"An unexpected error occurred with the LLM call: {e}")
         return "Failed to generate assessments due to an unexpected error."
 
+
+# --- 3c. Convert assessment text to structured schema via LLM ---
+def convert_assessment_text_to_schema(assessment_text):
+    """
+    Ask the LLM to convert freeform assessment text into a strict JSON schema
+    consumable by the Google Forms builder.
+
+    Schema:
+    {
+      "title": string,
+      "items": [
+        {"type": "mcq", "question": string, "choices": [string, ...], "correctAnswer": string, "points": int},
+        {"type": "short", "question": string, "correctAnswers": [string, ...], "points": int},
+        {"type": "paragraph", "question": string, "points": int}
+      ]
+    }
+    """
+    system_msg = (
+        "You are a converter that outputs only strict JSON (no markdown, no extra text)."
+    )
+    user_msg = f"Convert the following assessment to the required JSON schema. If points are not provided, default to 1.\n\n---\n{assessment_text}\n---\nReturn ONLY JSON."
+
+    try:
+        resp = client.chat.completions.create(
+            model=model_name,
+            messages=[
+                {"role": "system", "content": system_msg},
+                {"role": "user", "content": user_msg},
+            ],
+            temperature=0.1,
+            max_tokens=800,
+        )
+        content = resp.choices[0].message.content.strip()
+        # Ensure JSON object (strip markdown fences if present)
+        if content.startswith("```)" ):
+            content = content.strip('`')
+        # Attempt to locate JSON substring if extra text leaked
+        try:
+            data = json.loads(content)
+        except json.JSONDecodeError:
+            start = content.find('{')
+            end = content.rfind('}')
+            if start != -1 and end != -1 and end > start:
+                data = json.loads(content[start:end+1])
+            else:
+                raise
+        return data
+    except Exception as e:
+        st.error(f"Failed to convert assessment to JSON schema: {e}")
+        return None
+
+
+# --- 3d. Google APIs helpers (Forms + Gmail) ---
+GOOGLE_FORMS_SCOPES = [
+    "https://www.googleapis.com/auth/forms.body",
+    "https://www.googleapis.com/auth/drive.file",
+]
+GOOGLE_GMAIL_SCOPES = [
+    "https://www.googleapis.com/auth/gmail.send",
+]
+
+
+def get_google_credentials():
+    try:
+        from google.oauth2.credentials import Credentials
+        from google_auth_oauthlib.flow import InstalledAppFlow
+        from google.auth.transport.requests import Request
+    except Exception as e:
+        st.error("Google auth libraries not installed. Please install google-auth, google-auth-oauthlib, google-api-python-client.")
+        return None
+
+    creds = None
+    token_path = os.getenv("GOOGLE_TOKEN_PATH", os.path.join(os.getcwd(), "token.json"))
+    client_secret_path = (
+        os.getenv("GOOGLE_OAUTH_CLIENT_SECRET_FILE")
+        or os.path.join(os.getcwd(), ".streamlit", "google_oauth_client_secret.json")
+    )
+
+    if os.path.exists(token_path):
+        creds = Credentials.from_authorized_user_file(token_path, GOOGLE_FORMS_SCOPES + GOOGLE_GMAIL_SCOPES)
+    if not creds or not creds.valid:
+        if creds and creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+        else:
+            if not os.path.exists(client_secret_path):
+                st.error(f"Google OAuth client secret not found at: {client_secret_path}")
+                return None
+            flow = InstalledAppFlow.from_client_secrets_file(client_secret_path, GOOGLE_FORMS_SCOPES + GOOGLE_GMAIL_SCOPES)
+            # This will open a local browser to authorize
+            creds = flow.run_local_server(port=0)
+        # Save the credentials for next runs
+        with open(token_path, "w") as token:
+            token.write(creds.to_json())
+    return creds
+
+
+def build_google_services(creds):
+    try:
+        from googleapiclient.discovery import build
+    except Exception:
+        st.error("google-api-python-client not installed.")
+        return None, None
+    forms_service = build("forms", "v1", credentials=creds)
+    gmail_service = build("gmail", "v1", credentials=creds)
+    return forms_service, gmail_service
+
+
+def create_google_form_from_schema(forms_service, schema):
+    # Create the form shell
+    form_title = schema.get("title") or "Auto-Generated Quiz"
+    form = {"info": {"title": form_title}}
+    created = forms_service.forms().create(body=form).execute()
+    form_id = created["formId"]
+
+    # Batch update: add items
+    requests = []
+    index = 0
+    for item in schema.get("items", []):
+        q_type = item.get("type")
+        question = item.get("question", "Question")
+        points = int(item.get("points", 1))
+
+        if q_type == "mcq":
+            choices = item.get("choices", [])
+            correct = item.get("correctAnswer")
+            requests.append(
+                {
+                    "createItem": {
+                        "item": {
+                            "title": question,
+                            "questionItem": {
+                                "question": {
+                                    "required": True,
+                                    "grading": {
+                                        "pointValue": points,
+                                        "correctAnswers": {"answers": [{"value": str(correct)}]} if correct else None,
+                                    },
+                                },
+                                "choiceQuestion": {
+                                    "type": "RADIO",
+                                    "options": [{"value": str(c)} for c in choices],
+                                },
+                            },
+                        },
+                        "location": {"index": index},
+                    }
+                }
+            )
+        elif q_type == "short":
+            correct_answers = item.get("correctAnswers", [])
+            requests.append(
+                {
+                    "createItem": {
+                        "item": {
+                            "title": question,
+                            "questionItem": {
+                                "question": {
+                                    "required": True,
+                                    "grading": {
+                                        "pointValue": points,
+                                        "correctAnswers": {"answers": [{"value": str(a)} for a in correct_answers]} if correct_answers else None,
+                                    },
+                                },
+                                "textQuestion": {"paragraph": False},
+                            },
+                        },
+                        "location": {"index": index},
+                    }
+                }
+            )
+        else:  # paragraph/project or unknown
+            requests.append(
+                {
+                    "createItem": {
+                        "item": {
+                            "title": question,
+                            "questionItem": {
+                                "question": {
+                                    "required": False,
+                                    "grading": {"pointValue": points},
+                                },
+                                "textQuestion": {"paragraph": True},
+                            },
+                        },
+                        "location": {"index": index},
+                    }
+                }
+            )
+        index += 1
+
+    if requests:
+        forms_service.forms().batchUpdate(formId=form_id, body={"requests": requests}).execute()
+
+    # Get responder URL
+    form_info = forms_service.forms().get(formId=form_id).execute()
+    responder_uri = form_info.get("responderUri")
+    return form_id, responder_uri
+
+
+def send_email_with_link(gmail_service, recipients, subject, body_text):
+    from email.mime.text import MIMEText
+    import base64
+
+    message = MIMEText(body_text)
+    message["to"] = ", ".join(recipients)
+    message["subject"] = subject
+    raw = base64.urlsafe_b64encode(message.as_bytes()).decode()
+    gmail_service.users().messages().send(userId="me", body={"raw": raw}).execute()
+    return True
+
 # --- 4. Streamlit User Interface ---
 st.set_page_config(page_title="PDF ➜ Lesson Plan Generator", layout="centered")
 
@@ -299,6 +510,12 @@ if uploaded_file is not None:
             # Sidebar options for the agent
             st.sidebar.subheader("Agent Settings")
             attach_pdf = st.sidebar.checkbox("Attach PDF context to each question", value=True, key="agent_attach_pdf")
+            st.sidebar.markdown("---")
+            st.sidebar.subheader("Quiz Delivery (Google Form)")
+            enable_delivery = st.sidebar.checkbox("Enable quiz delivery via Google Form", value=False, key="enable_delivery")
+            recipient_emails_raw = st.sidebar.text_area("Student emails (comma-separated)", key="recipient_emails") if enable_delivery else ""
+            email_subject = st.sidebar.text_input("Email subject", value="Your Quiz", key="email_subject") if enable_delivery else ""
+            email_message = st.sidebar.text_area("Email message", value="Please complete the quiz at the link below:", key="email_message") if enable_delivery else ""
             if st.sidebar.button("Reset Chat", key="btn_reset_chat"):
                 st.session_state.pop("agent_messages", None)
 
@@ -343,6 +560,36 @@ if uploaded_file is not None:
                 st.session_state.agent_messages.append({"role": "assistant", "content": assistant_reply})
                 with st.chat_message("assistant"):
                     st.markdown(assistant_reply)
+
+                # Optional delivery path: convert assessment and send Google Form link
+                if enable_delivery and any(k in user_prompt.lower() for k in ["quiz", "assessment", "mcq", "short", "project"]):
+                    with st.spinner("Preparing Google Form and sending emails..."):
+                        schema = convert_assessment_text_to_schema(assistant_reply)
+                        if not schema:
+                            st.error("Could not convert the generated content into a quiz schema.")
+                        else:
+                            creds = get_google_credentials()
+                            if not creds:
+                                st.error("Google authentication is not configured.")
+                            else:
+                                forms_service, gmail_service = build_google_services(creds)
+                                if not forms_service or not gmail_service:
+                                    st.error("Google services failed to initialize.")
+                                else:
+                                    try:
+                                        form_id, form_link = create_google_form_from_schema(forms_service, schema)
+                                        st.success(f"Form created: {form_link}")
+                                        recipients = [e.strip() for e in (recipient_emails_raw or "").split(',') if e.strip()]
+                                        if recipients:
+                                            send_email_with_link(
+                                                gmail_service,
+                                                recipients=recipients,
+                                                subject=email_subject or "Your Quiz",
+                                                body_text=f"{email_message or 'Please complete the quiz at the link below:'}\n\n{form_link}",
+                                            )
+                                            st.success(f"Email sent to: {', '.join(recipients)}")
+                                    except Exception as e:
+                                        st.error(f"Failed to create form or send emails: {e}")
 
 st.markdown("---")
 st.caption("Upload a PDF, then use the sidebar to generate a lesson plan or assessments.")
