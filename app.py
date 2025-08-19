@@ -191,7 +191,7 @@ st.markdown("Use the sidebar to upload content and choose between generating a l
 
 # Sidebar controls
 st.sidebar.header("Controls")
-mode = st.sidebar.radio("Mode", ["Lesson Plan", "Assessment Generator"], key="mode")
+mode = st.sidebar.radio("Mode", ["Lesson Plan", "Assessment Generator", "AI Agent"], key="mode")
 uploaded_file = st.sidebar.file_uploader("Upload a PDF file", type=["pdf"], key="pdf_uploader")
 
 # Placeholders for extracted text and result
@@ -295,6 +295,54 @@ if uploaded_file is not None:
                     )
                 result_placeholder.subheader("Assessments")
                 result_placeholder.markdown(content)
+        elif mode == "AI Agent":
+            # Sidebar options for the agent
+            st.sidebar.subheader("Agent Settings")
+            attach_pdf = st.sidebar.checkbox("Attach PDF context to each question", value=True, key="agent_attach_pdf")
+            if st.sidebar.button("Reset Chat", key="btn_reset_chat"):
+                st.session_state.pop("agent_messages", None)
+
+            # Initialize chat history
+            if "agent_messages" not in st.session_state:
+                st.session_state.agent_messages = [
+                    {"role": "system", "content": "You are an AI teaching assistant. Answer clearly and concisely. Cite from the provided PDF context when relevant."}
+                ]
+
+            # Display existing chat
+            for msg in st.session_state.agent_messages:
+                if msg["role"] in ("user", "assistant"):
+                    with st.chat_message(msg["role"]):
+                        st.markdown(msg["content"]) 
+
+            # Chat input
+            user_prompt = st.chat_input("Ask about the PDF, pedagogy, or create materials...")
+            if user_prompt:
+                st.session_state.agent_messages.append({"role": "user", "content": user_prompt})
+
+                # Build request messages
+                request_messages = list(st.session_state.agent_messages)
+                if attach_pdf and pdf_text:
+                    # Add/update a prior system message with context for this turn
+                    request_messages.append({
+                        "role": "system",
+                        "content": f"PDF context (truncated):\n---\n{pdf_text[:6000]}\n---"
+                    })
+
+                with st.spinner("Thinking..."):
+                    try:
+                        resp = client.chat.completions.create(
+                            model=model_name,
+                            messages=request_messages,
+                            max_tokens=800,
+                            temperature=0.4,
+                        )
+                        assistant_reply = resp.choices[0].message.content
+                    except Exception as e:
+                        assistant_reply = f"Sorry, I encountered an error: {e}"
+
+                st.session_state.agent_messages.append({"role": "assistant", "content": assistant_reply})
+                with st.chat_message("assistant"):
+                    st.markdown(assistant_reply)
 
 st.markdown("---")
 st.caption("Upload a PDF, then use the sidebar to generate a lesson plan or assessments.")
