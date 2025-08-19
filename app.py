@@ -217,9 +217,19 @@ def convert_assessment_text_to_schema(assessment_text):
             max_tokens=800,
         )
         content = resp.choices[0].message.content.strip()
-        # Ensure JSON object (strip markdown fences if present)
-        if content.startswith("```)" ):
-            content = content.strip('`')
+        # Strip markdown fences if present
+        if content.startswith("```"):
+            # remove leading/trailing fences with optional language tag
+            content = content.strip()
+            if content.startswith("```"):
+                content = content[3:]
+                # drop first line if it is a language
+                first_newline = content.find('\n')
+                if first_newline != -1:
+                    content = content[first_newline + 1 :]
+            if content.endswith("```"):
+                content = content[: -3]
+
         # Attempt to locate JSON substring if extra text leaked
         try:
             data = json.loads(content)
@@ -227,7 +237,7 @@ def convert_assessment_text_to_schema(assessment_text):
             start = content.find('{')
             end = content.rfind('}')
             if start != -1 and end != -1 and end > start:
-                data = json.loads(content[start:end+1])
+                data = json.loads(content[start : end + 1])
             else:
                 raise
         return data
@@ -271,9 +281,14 @@ def get_google_credentials():
             if not os.path.exists(client_secret_path):
                 st.error(f"Google OAuth client secret not found at: {client_secret_path}")
                 return None
-            flow = InstalledAppFlow.from_client_secrets_file(client_secret_path, GOOGLE_FORMS_SCOPES + GOOGLE_GMAIL_SCOPES)
-            # This will open a local browser to authorize
-            creds = flow.run_local_server(port=0)
+            flow = InstalledAppFlow.from_client_secrets_file(
+                client_secret_path, GOOGLE_FORMS_SCOPES + GOOGLE_GMAIL_SCOPES
+            )
+            # Try local server first; fall back to console (device) flow if needed
+            try:
+                creds = flow.run_local_server(port=0)
+            except Exception:
+                creds = flow.run_console()
         # Save the credentials for next runs
         with open(token_path, "w") as token:
             token.write(creds.to_json())
@@ -298,8 +313,15 @@ def create_google_form_from_schema(forms_service, schema):
     created = forms_service.forms().create(body=form).execute()
     form_id = created["formId"]
 
-    # Batch update: add items
-    requests = []
+    # Batch update: set quiz mode and add items
+    requests = [
+        {
+            "updateSettings": {
+                "settings": {"quizSettings": {"isQuiz": True}},
+                "updateMask": "quizSettings.isQuiz",
+            }
+        }
+    ]
     index = 0
     for item in schema.get("items", []):
         q_type = item.get("type")
@@ -318,7 +340,7 @@ def create_google_form_from_schema(forms_service, schema):
                                 "question": {
                                     "required": True,
                                     "grading": {
-                                        "pointValue": points,
+                                        "pointValue": int(points),
                                         "correctAnswers": {"answers": [{"value": str(correct)}]} if correct else None,
                                     },
                                 },
@@ -343,7 +365,7 @@ def create_google_form_from_schema(forms_service, schema):
                                 "question": {
                                     "required": True,
                                     "grading": {
-                                        "pointValue": points,
+                                        "pointValue": int(points),
                                         "correctAnswers": {"answers": [{"value": str(a)} for a in correct_answers]} if correct_answers else None,
                                     },
                                 },
@@ -363,7 +385,7 @@ def create_google_form_from_schema(forms_service, schema):
                             "questionItem": {
                                 "question": {
                                     "required": False,
-                                    "grading": {"pointValue": points},
+                                    "grading": {"pointValue": int(points)},
                                 },
                                 "textQuestion": {"paragraph": True},
                             },
