@@ -122,18 +122,81 @@ Requirements:
         return "Failed to generate a lesson plan due to an unexpected error."
 
 
+# --- 3b. Function to Generate Assessments ---
+def generate_assessments(
+    text_content,
+    assessment_types,
+    mcq_count=0,
+    short_count=0,
+    include_project=False,
+    difficulty="Intermediate",
+    include_answers=True,
+    project_focus="",
+    rubric_detail_level="Detailed",
+):
+    """
+    Generate assessments (MCQ, Short Answer, Project) from the provided content and user preferences.
+    """
+    if not text_content:
+        return "No source content provided. Please upload a PDF with relevant curriculum or material."
+
+    # Build a focused prompt
+    parts = []
+    if "MCQ" in assessment_types and mcq_count > 0:
+        parts.append(f"- MCQs: {mcq_count} questions with 4 options each, one correct answer. Vary difficulty around {difficulty}.")
+    if "Short Answer" in assessment_types and short_count > 0:
+        parts.append(f"- Short Answer: {short_count} concise prompts targeting key ideas at {difficulty} difficulty.")
+    if include_project and "Project" in assessment_types:
+        parts.append(f"- Project: A project brief focused on '{project_focus or 'core learning objectives'}' with a {rubric_detail_level.lower()} rubric.")
+
+    include_key_text = "Include an answer key after each section." if include_answers else "Do not include answer keys."
+
+    prompt = f"""
+You are an experienced assessment designer. Create assessments based on the source material below.
+
+Assessment specifications:
+{chr(10).join(parts) if parts else '- No specific counts provided; propose a balanced set.'}
+Overall difficulty: {difficulty}
+Formatting: Use markdown headings for each assessment section and bullet lists for items. {include_key_text}
+
+Source content:
+---
+{text_content[:6000]}
+---
+"""
+
+    try:
+        response = client.chat.completions.create(
+            model=model_name,
+            messages=[
+                {"role": "system", "content": "You are a meticulous assessment designer who writes clear, fair, and curriculum-aligned items."},
+                {"role": "user", "content": prompt},
+            ],
+            max_tokens=1200,
+            temperature=0.5,
+        )
+        return response.choices[0].message.content
+    except (openai.APIError, openai.APIConnectionError, openai.RateLimitError, openai.BadRequestError) as e:
+        st.error(f"OpenAI API Error: {e}. Check your API key and network connection.")
+        return "Failed to generate assessments due to an API error."
+    except Exception as e:
+        st.error(f"An unexpected error occurred with the LLM call: {e}")
+        return "Failed to generate assessments due to an unexpected error."
+
 # --- 4. Streamlit User Interface ---
 st.set_page_config(page_title="PDF ➜ Lesson Plan Generator", layout="centered")
 
-st.title("📘 Lesson Plan Generator from PDF")
-st.markdown("Upload a curriculum or reading PDF, enter study duration and class size, then generate a structured lesson plan.")
+st.title("📘 Teaching Toolkit from PDF")
+st.markdown("Use the sidebar to upload content and choose between generating a lesson plan or assessments.")
 
-# File uploader widget
-uploaded_file = st.file_uploader("Upload a PDF file", type=["pdf"], key="pdf_uploader")
+# Sidebar controls
+st.sidebar.header("Controls")
+mode = st.sidebar.radio("Mode", ["Lesson Plan", "Assessment Generator"], key="mode")
+uploaded_file = st.sidebar.file_uploader("Upload a PDF file", type=["pdf"], key="pdf_uploader")
 
 # Placeholders for extracted text and result
 extracted_text_placeholder = st.empty()
-lesson_plan_placeholder = st.empty()
+result_placeholder = st.empty()
 
 if uploaded_file is not None:
     st.info("PDF uploaded successfully! Processing...")
@@ -141,20 +204,21 @@ if uploaded_file is not None:
     # Extract text when file is uploaded
     with st.spinner("Extracting text from PDF..."):
         pdf_text = extract_text_from_pdf(uploaded_file)
-    
-    if pdf_text:
-        extracted_text_placeholder.subheader("Extracted Text Preview")
-        extracted_text_placeholder.text_area(
-            "Full Text (truncated for preview):",
-            pdf_text[:1200] + "..." if len(pdf_text) > 1200 else pdf_text,
-            height=260,
-            disabled=True,
-        )
 
-        st.markdown("### Inputs")
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            study_duration_weeks = st.number_input(
+    if not pdf_text:
+        st.error("Failed to extract text from the PDF. Please try a different file.")
+    else:
+        with st.expander("Extracted Text Preview", expanded=False):
+            st.text_area(
+                "Full Text (truncated for preview):",
+                pdf_text[:1200] + "..." if len(pdf_text) > 1200 else pdf_text,
+                height=240,
+                disabled=True,
+            )
+
+        if mode == "Lesson Plan":
+            st.sidebar.subheader("Lesson Plan Settings")
+            study_duration_weeks = st.sidebar.number_input(
                 "Duration of study (weeks)",
                 min_value=1,
                 max_value=52,
@@ -162,8 +226,7 @@ if uploaded_file is not None:
                 step=1,
                 key="duration_weeks",
             )
-        with col2:
-            num_students = st.number_input(
+            num_students = st.sidebar.number_input(
                 "Number of students",
                 min_value=1,
                 max_value=500,
@@ -171,8 +234,7 @@ if uploaded_file is not None:
                 step=1,
                 key="num_students",
             )
-        with col3:
-            sections_per_week = st.number_input(
+            sections_per_week = st.sidebar.number_input(
                 "Sections per week",
                 min_value=1,
                 max_value=14,
@@ -181,14 +243,59 @@ if uploaded_file is not None:
                 key="sections_per_week",
             )
 
-        if st.button("Generate Lesson Plan", use_container_width=True, key="generate_plan_button"):
-            with st.spinner("Generating lesson plan with AI..."):
-                plan = generate_lesson_plan(pdf_text, study_duration_weeks, num_students, sections_per_week)
-            lesson_plan_placeholder.subheader("Lesson Plan")
-            lesson_plan_placeholder.markdown(plan)
-    else:
-        st.error("Failed to extract text from the PDF. Please try a different file.")
+            if st.sidebar.button("Generate Lesson Plan", key="btn_generate_plan"):
+                with st.spinner("Generating lesson plan with AI..."):
+                    plan = generate_lesson_plan(pdf_text, study_duration_weeks, num_students, sections_per_week)
+                result_placeholder.subheader("Lesson Plan")
+                result_placeholder.markdown(plan)
+
+        elif mode == "Assessment Generator":
+            st.sidebar.subheader("Assessment Settings")
+            assessment_types = st.sidebar.multiselect(
+                "Assessment types",
+                ["MCQ", "Short Answer", "Project"],
+                default=["MCQ", "Short Answer"],
+                key="assess_types",
+            )
+            difficulty = st.sidebar.selectbox(
+                "Difficulty",
+                ["Introductory", "Intermediate", "Advanced"],
+                index=1,
+                key="difficulty",
+            )
+            include_answers = st.sidebar.checkbox("Include answer key", value=True, key="include_answers")
+
+            mcq_count = 0
+            short_count = 0
+            include_project = False
+            project_focus = ""
+            rubric_detail_level = "Detailed"
+
+            if "MCQ" in assessment_types:
+                mcq_count = st.sidebar.number_input("MCQ count", min_value=1, max_value=100, value=10, step=1, key="mcq_count")
+            if "Short Answer" in assessment_types:
+                short_count = st.sidebar.number_input("Short answer count", min_value=1, max_value=50, value=5, step=1, key="short_count")
+            if "Project" in assessment_types:
+                include_project = True
+                project_focus = st.sidebar.text_input("Project topic/focus", value="Capstone applying key concepts", key="project_focus")
+                rubric_detail_level = st.sidebar.selectbox("Rubric detail level", ["Brief", "Detailed"], index=1, key="rubric_level")
+
+            if st.sidebar.button("Generate Assessment", key="btn_generate_assess"):
+                with st.spinner("Generating assessments with AI..."):
+                    content = generate_assessments(
+                        text_content=pdf_text,
+                        assessment_types=assessment_types,
+                        mcq_count=mcq_count,
+                        short_count=short_count,
+                        include_project=include_project,
+                        difficulty=difficulty,
+                        include_answers=include_answers,
+                        project_focus=project_focus,
+                        rubric_detail_level=rubric_detail_level,
+                    )
+                result_placeholder.subheader("Assessments")
+                result_placeholder.markdown(content)
 
 st.markdown("---")
-st.caption("Upload a PDF, set duration and class size, then generate a tailored lesson plan.")
+st.caption("Upload a PDF, then use the sidebar to generate a lesson plan or assessments.")
 
