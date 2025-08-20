@@ -416,6 +416,50 @@ def send_email_with_link(gmail_service, recipients, subject, body_text):
     gmail_service.users().messages().send(userId="me", body={"raw": raw}).execute()
     return True
 
+
+# --- 3e. Composio tool-enabled email sender (AI Agent function) ---
+def agent_send_email_via_composio(user_id, recipient_email, subject, body_text, model=None):
+    """
+    Uses Composio's GMAIL_SEND_EMAIL tool via an LLM tool-call to send an email.
+
+    Parameters:
+    - user_id: Identifier for the Composio-connected user (often the email of the connected account)
+    - recipient_email: Email address to send to
+    - subject: Email subject line
+    - body_text: Email body (plain text)
+    - model: Optional override for the LLM model; defaults to global model_name
+
+    Returns the provider result object on success, or None on failure.
+    """
+    try:
+        from composio import Composio
+    except Exception:
+        st.error("Composio SDK not installed. Add 'composio' to requirements and reinstall dependencies.")
+        return None
+
+    try:
+        composio_client = Composio()
+        tools = composio_client.tools.get(user_id=user_id, tools=["GMAIL_SEND_EMAIL"])
+        response = client.chat.completions.create(
+            model=(model or model_name),
+            tools=tools,
+            messages=[
+                {"role": "system", "content": "You are a helpful assistant."},
+                {
+                    "role": "user",
+                    "content": (
+                        f"Send an email to {recipient_email} with the subject '{subject}' and "
+                        f"the body '{body_text}'"
+                    ),
+                },
+            ],
+        )
+        result = composio_client.provider.handle_tool_calls(response=response, user_id=user_id)
+        return result
+    except Exception as e:
+        st.error(f"Failed to send email via Composio: {e}")
+        return None
+
 # --- 4. Streamlit User Interface ---
 st.set_page_config(page_title="PDF ➜ Lesson Plan Generator", layout="centered")
 
@@ -653,6 +697,27 @@ if uploaded_file is not None:
                                     st.session_state.pop("pending_quiz_text", None)
                     except Exception as e:
                         st.error(f"Failed to create form or send emails: {e}")
+
+            # Additional: Composio-based direct Gmail sender
+            st.sidebar.markdown("---")
+            st.sidebar.subheader("Composio Gmail Sender")
+            comp_user_id = st.sidebar.text_input("Composio user ID (connected Gmail)", value=os.getenv("COMPOSIO_USER_ID", ""), key="comp_user_id")
+            comp_recipient = st.sidebar.text_input("Recipient email", value="", key="comp_recipient")
+            comp_subject = st.sidebar.text_input("Subject", value="", key="comp_subject")
+            comp_body = st.sidebar.text_area("Body", value="", key="comp_body")
+            can_send_comp = bool(comp_user_id and comp_recipient and comp_subject and comp_body)
+            if st.sidebar.button("Send Email via Composio", key="btn_send_comp", disabled=not can_send_comp):
+                with st.spinner("Sending email via Composio..."):
+                    result = agent_send_email_via_composio(
+                        user_id=comp_user_id,
+                        recipient_email=comp_recipient,
+                        subject=comp_subject,
+                        body_text=comp_body,
+                    )
+                if result is not None:
+                    st.sidebar.success("Email sent successfully via Composio.")
+                else:
+                    st.sidebar.error("Failed to send email via Composio. See logs above.")
 
 st.markdown("---")
 st.caption("Upload a PDF, then use the sidebar to generate a lesson plan or assessments.")
